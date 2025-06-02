@@ -1,0 +1,1512 @@
+---
+title: "Vigilancia de Enfermedades Inmunoprevenibles por Vacuna"
+lang: es
+author: "Dirección de Epidemiología e Investigación"
+institute: "Direccion Regional de Salud Lima"
+format: 
+  revealjs:
+    smaller: true
+    scrollable: true
+    theme: sky
+    slide-number: true
+    footer: "Dirección de Epidemiología e Investigación"
+    logo: LOGO_EPIDEMIOLOGIA.png
+    css: styles.css
+    
+editor: visual
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+library(sf)
+library(leaflet)
+library(ggplot2)
+library(ggspatial)
+library(RColorBrewer)
+library(gridExtra)
+library(cowplot)
+library(rio)
+library(janitor)
+library(tidyverse)
+library(apyramid)
+library(stringr)
+library(dplyr)
+library("ggthemes")
+library(foreign)
+library(sqldf)
+library(aweek)
+library(zoo)
+library(vroom)
+library(paletteer)
+library(flextable)
+library(kableExtra)
+library(knitr)
+library(tmap)
+library(spdep)
+library(RCurl)
+library(tmaptools)
+library(spData)
+library(raster)
+library(sp)
+library(DT)
+library(shiny)
+library(mapsPERU)
+library(htmlwidgets)
+library(plotly)
+library(htmltools)
+#cargamos la base de acumulado 
+
+acumulo_bd<-import("D:\\epi 2023\\base_datos\\acumulo\\bd_acumulo.xlsx")%>%
+  clean_names()
+
+acumulo_bd$ubigeo<-as.character(acumulo_bd$ubigeo)
+acumulo_bd$fecha<-as.Date(acumulo_bd$fecha,format="%d/%m/%Y")
+
+acumulo_bd<-acumulo_bd%>%
+  filter(ubigeo!="151026")
+
+#cargamos dataset de ubigeo
+ubigeo_bd<-import("D:\\epi 2023\\base_datos\\UBIGEO.xlsx")%>%
+  clean_names()%>%
+  filter(ubigeo!= "151026")%>%
+  dplyr::select(ubigeo,provincia,distrito)
+
+# filtramos acumulado para distritos
+acumulo_distritos<-acumulo_bd%>%
+   filter(ubigeo!="151026",str_starts(distrito, "DIST"))%>%
+  dplyr::select(-distrito)
+
+#juntando acumulo_distritos con ubigeo
+acumulo_distritos<-acumulo_distritos%>%
+  left_join(ubigeo_bd,by="ubigeo")
+
+
+#cargamos dataset de poblacion_historica
+
+poblacion_bd<-import("D:\\epi 2023\\base_datos\\poblacion_historica.xlsx")%>%
+  clean_names()%>%
+  filter(ano>=2020,ubigeo!="151026")
+
+
+
+```
+
+```{r}
+#| results: hide
+
+# mapa_region_lima<-map_DIST%>%
+#   filter(DEPARTAMENTO=="Lima",
+#          PROVINCIA!="Lima")%>%
+#   clean_names()%>%
+#   dplyr::select(cod_distrito,provincia,distrito,coords_x,coords_y,geometry)
+shp_region_lima<- st_read("D:\\epi 2023\\MAPAS\\LIMA REGION\\DISTRITOS\\DISTRITOS_REGION_LIMA.shp")%>%
+  clean_names()
+
+```
+
+## Notas Tecnicas
+
+-   El calculo de suceptibles toma como referencia los últimos 5 años.
+
+-   Para sarampión/rubeola y polio tiene su punto de partida desde la ultima campaña de seguimiento o barrido.
+
+-   Si los no vacunados es un valor negativo significa que están protegiendo a un número mayor de niños.
+
+-   La fuente de datos es **HIS-MINSA** brinda por la Dirección de Estadistica,Informática y Telecomunicaciones de la DIRESA LIMA.
+
+-   La presente presentacion tiene como fecha de corte al mes de **ABRIL DEL 2025**.
+
+## 1. Acumulo de Suceptibles para vacuna Antipolio(IPV)
+
+::: panel-tabset
+#### TABLA
+
+```{r}
+
+#trabajaremos con poblacion menor de 1 año y a partir del año 2023 en adelante
+
+pobla_ipv3<- poblacion_bd%>%
+  filter(ano>=2023)%>%
+  dplyr::select(ano,ubigeo,x0a)%>%
+  mutate(cod_ipv3=paste0(ano,ubigeo))%>%
+  dplyr::select(-ubigeo,-ano)%>%
+  rename("pobla_men1a"="x0a")
+
+#generaremos la tabla poblacion por año para ipv3
+tbl_pobla_ipv3<- poblacion_bd%>%
+  filter(ano>=2023)%>%
+  dplyr::select(ano,ubigeo,x0a)%>%
+  mutate(cod_ipv3=paste0(ano,ubigeo))%>%
+  rename("pobla_men1a"="x0a")%>%
+  dplyr::select(ubigeo,ano,pobla_men1a)%>%
+  pivot_wider(
+    names_from = "ano",
+    values_from = "pobla_men1a"
+  )%>%
+  clean_names()%>%
+  mutate(pobla_total=x2023+x2024+x2025)
+
+#generamos los no vacunados,ineficada,suceptible,IR
+
+no_vacunados_ipv3<- acumulo_distritos%>%
+  filter(ano>=2023)%>%
+  dplyr::select(ano,ubigeo,ipv_3)%>%
+  group_by(ano,ubigeo)%>%
+  summarise(total_ipv3=sum(ipv_3))%>%
+  mutate(cod_ipv3=paste0(ano,ubigeo))
+
+
+no_vacunados_ipv3<-no_vacunados_ipv3%>%
+  left_join(pobla_ipv3,by="cod_ipv3")
+
+no_vacunados_ipv3<-no_vacunados_ipv3%>%
+  dplyr::select(cod_ipv3,ano,ubigeo,total_ipv3,pobla_men1a)%>%
+  group_by(ubigeo)%>%
+  summarise(total_vacunados=sum(total_ipv3),
+            total_poblacion=sum(pobla_men1a))%>%
+  mutate(no_vacunados=total_poblacion - total_vacunados,
+         no_inmunizados=ceiling(total_vacunados*0.05),
+         suceptibles=no_vacunados+no_inmunizados)%>%
+  ungroup
+
+no_vacunados_ipv3<- no_vacunados_ipv3%>%
+  left_join(tbl_pobla_ipv3)%>%
+  dplyr::select(-x2023,-x2024)
+
+no_vacunados_ipv3<-no_vacunados_ipv3%>%
+  mutate(ir=round(suceptibles/x2025,2))
+  
+no_vacunados_ipv3$riesgo_ir<-with(no_vacunados_ipv3, ifelse(ir < 0, "NEGATIVO",
+                      ifelse(ir < 0.5, "BAJO",
+                      ifelse(ir < 0.8, "MEDIO", "ALTO"))))
+
+no_vacunados_ipv3<-no_vacunados_ipv3%>%
+  dplyr::select(-total_vacunados,-total_poblacion,-x2025)
+
+#rm(no_vacunados_ipv3)
+
+
+
+
+
+#generaremos los vacunados por año
+vacunados_ipv3<- acumulo_distritos%>%
+  filter(ano>=2023)%>%
+  dplyr::select(ano,ubigeo,ipv_3)%>%
+  group_by(ano,ubigeo)%>%
+  summarise(total_ipv3=sum(ipv_3))%>%
+  pivot_wider(
+    names_from = "ano",
+    values_from = "total_ipv3"
+  )%>%
+  rename("v2023"="2023",
+         "v2024"="2024",
+         "v2025"="2025")%>%
+  mutate(total_vacunados=v2023+v2024+v2025)
+
+
+# juntaremos entonces las tablas generadas para poner ver el indiceo de riesgo
+
+
+tbl_acumulo_ipv3<-tbl_pobla_ipv3%>%
+  left_join(vacunados_ipv3)
+
+tbl_acumulo_ipv3<- tbl_acumulo_ipv3%>%
+  left_join(no_vacunados_ipv3)
+
+tbl_acumulo_ipv3<-tbl_acumulo_ipv3%>%
+  left_join(ubigeo_bd)
+
+tbl_acumulo_ipv3<-tbl_acumulo_ipv3%>%
+  dplyr::select(provincia,distrito,total_vacunados,no_vacunados,no_inmunizados,suceptibles,ir,riesgo_ir)
+
+
+datatable(tbl_acumulo_ipv3,colnames = c('Provincia','Distrito',
+                                   'Total Vac.','No Vacunados',
+                                   'No Inmunizados','Suceptibles',
+                                   'IR','Riesgo'),
+          extensions = 'Buttons',
+           options = list(
+             dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 5,
+    #autoWidth = TRUE,  # Ajuste automático del ancho
+    #scrollX = FALSE,   # TRUE si tuvieras muchas columnas
+    columnDefs = list(list(width = 'auto', targets = "_all"))  # Ajuste proporcional
+),caption = "Tabla 1: Acumulo de Suceptibles IPV(2023-2025)"
+)%>%
+  formatStyle(
+    'riesgo_ir',
+    target = 'cell',
+    backgroundColor = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("red", "yellow", "green", NA)
+    ),
+    color = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("white", "white", "white", "black")
+    ),
+    fontWeight = "bold"
+  )
+```
+
+#### MAPA
+
+```{r}
+
+# 1. Unir y seleccionar
+mapa_acumulo_ipv3 <- shp_region_lima %>%
+  left_join(no_vacunados_ipv3, by = "ubigeo") %>%
+  select(ubigeo, nombprov, nombdist, ir, riesgo_ir, geometry)
+
+# Paso 1: Forzar factor y niveles ordenados (ya hecho)
+mapa_acumulo_ipv3 <- mapa_acumulo_ipv3 %>%
+  mutate(
+    riesgo_ir = toupper(trimws(riesgo_ir)),
+    riesgo_ir = factor(riesgo_ir, levels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO"))
+  )
+
+# Paso 2: Crear columna color manualmente para cada nivel, NA tendrá negro
+mapa_acumulo_ipv3 <- mapa_acumulo_ipv3 %>%
+  mutate(
+    color_riesgo = case_when(
+      riesgo_ir == "NEGATIVO" ~ "transparent",
+      riesgo_ir == "BAJO"     ~ "green",
+      riesgo_ir == "MEDIO"    ~ "yellow",
+      riesgo_ir == "ALTO"     ~ "red",
+      TRUE                    ~ "black"   # para NA y cualquier otro valor
+    )
+  )
+
+# Paso 3: Crear mapa usando color_riesgo directamente
+leaflet(mapa_acumulo_ipv3) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~color_riesgo,
+    weight = 1,
+    opacity = 1,
+    color = "black",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = ~paste0(
+  "<strong>Distrito:</strong> ", nombdist, "<br>",
+  "<strong>Provincia:</strong> ", nombprov, "<br>",
+  "<strong>Índice de Riesgo (IR):</strong> ", ir, "<br>",
+  "<strong>Clasificación Riesgo:</strong> ", 
+  ifelse(is.na(riesgo_ir), "Sin dato", as.character(riesgo_ir))
+) %>% lapply(htmltools::HTML),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    colors = c("transparent", "green", "yellow", "red", "black"),
+    labels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO", "Sin dato"),
+    opacity = 0.7,
+    title = "Nivel de Riesgo",
+    position = "bottomright"
+  )
+
+```
+:::
+
+## 2. Tasa de Desercion para vacuna Antipolio(IPV)
+
+::: panel-tabset
+#### TABLA
+
+```{r}
+abandono_vacuna_ipv3<-acumulo_distritos%>%
+  filter(ano>=2023)%>%
+  dplyr::select(ano,ubigeo,ipv_1,ipv_3)%>%
+  mutate(cod_ipv3=paste0(ano,ubigeo))%>%
+  group_by(ubigeo)%>%
+  summarise(total_ipv1=sum(ipv_1),
+    total_ipv3=sum(ipv_3))%>%
+  mutate(tasa_desercion=round((((total_ipv1-total_ipv3)/total_ipv1)*1),2),
+         riesgo_desercion=
+           case_when(
+    tasa_desercion < 0  ~ "NEGATIVO",
+    tasa_desercion >= 0 & tasa_desercion < 5    ~ "BAJO",
+    tasa_desercion >= 5 & tasa_desercion < 10   ~ "MEDIO",
+    tasa_desercion >= 10 ~ "ALTO",
+    TRUE                ~ NA_character_ # Para valores NA o no clasificados
+  ))
+  
+tbl_desercion_ipv3<- abandono_vacuna_ipv3%>%
+  left_join(ubigeo_bd)%>%
+  dplyr::select(provincia,distrito,total_ipv1,total_ipv3,tasa_desercion,
+                riesgo_desercion)
+
+datatable(tbl_desercion_ipv3,colnames = c('Provincia','Distrito',
+                                   'Total IPV 1.','Total IPV 3',
+                                   'Tasa de Desercion','Riesgo'),
+           extensions = 'Buttons',
+           options = list(
+             dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 5,
+    #autoWidth = TRUE,  # Ajuste automático del ancho
+    #scrollX = FALSE,   # TRUE si tuvieras muchas columnas
+    columnDefs = list(list(width = 'auto', targets = "_all"))  # Ajuste proporcional
+),caption = "Tabla 2: Tasa de Desercion IPV (2023-2025)"
+)%>%
+  formatStyle(
+    'riesgo_desercion',
+    target = 'cell',
+    backgroundColor = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("red", "yellow", "green", NA)
+    ),
+    color = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("white", "white", "white", "black")
+    ),
+    fontWeight = "bold"
+  )
+
+```
+
+#### MAPA
+
+```{r}
+# 1. Unir y seleccionar
+mapa_desercion_ipv3 <- shp_region_lima %>%
+  left_join(abandono_vacuna_ipv3, by = "ubigeo") %>%
+  select(ubigeo, nombprov, nombdist, tasa_desercion, riesgo_desercion, geometry)
+
+# Paso 1: Forzar factor y niveles ordenados (ya hecho)
+mapa_desercion_ipv3 <- mapa_desercion_ipv3 %>%
+  mutate(
+    riesgo_desercion = toupper(trimws(riesgo_desercion)),
+    riesgo_desercion = factor(riesgo_desercion, levels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO"))
+  )
+
+# Paso 2: Crear columna color manualmente para cada nivel, NA tendrá negro
+mapa_desercion_ipv3 <- mapa_desercion_ipv3 %>%
+  mutate(
+    color_riesgo = case_when(
+      riesgo_desercion == "NEGATIVO" ~ "transparent",
+      riesgo_desercion == "BAJO"     ~ "green",
+      riesgo_desercion == "MEDIO"    ~ "yellow",
+      riesgo_desercion == "ALTO"     ~ "red",
+      TRUE                    ~ "black"   # para NA y cualquier otro valor
+    )
+  )
+
+# Paso 3: Crear mapa usando color_riesgo directamente
+leaflet(mapa_desercion_ipv3) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~color_riesgo,
+    weight = 1,
+    opacity = 1,
+    color = "black",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = ~paste0(
+  "<strong>Distrito:</strong> ", nombdist, "<br>",
+  "<strong>Provincia:</strong> ", nombprov, "<br>",
+  "<strong>Tasa de Deserción:</strong> ", tasa_desercion, "<br>",
+  "<strong>Clasificación Riesgo:</strong> ", 
+  ifelse(is.na(riesgo_desercion), "Sin dato", as.character(riesgo_desercion))
+) %>% lapply(htmltools::HTML),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    colors = c("transparent", "green", "yellow", "red", "black"),
+    labels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO", "Sin dato"),
+    opacity = 0.7,
+    title = "Nivel de Riesgo",
+    position = "bottomright"
+  )
+
+```
+:::
+
+## 3. Escenario de Riesgo para vacuna Antipolio(IPV)
+
+::: panel-tabset
+#### TABLA
+
+```{r}
+escenario_ipv3<-no_vacunados_ipv3%>%
+  dplyr::select(ubigeo,ir)%>%
+  left_join(abandono_vacuna_ipv3)%>%
+  dplyr::select(ubigeo,ir,tasa_desercion)
+
+clasificar_escenario <- function(tasa_desercion, ir) {
+  # Paso 1: manejar valores NA
+  if (is.na(tasa_desercion) || is.na(ir)) return(NA)
+
+  # Paso 2: manejar negativos como "Negativo" → ESCENARIO I
+  if (tasa_desercion < 0 || ir < 0) return("ESCENARIO I")
+
+  # Paso 3: lógica por rangos
+  if (tasa_desercion < 5) {
+    if (ir < 0.5) return("ESCENARIO I")
+    else if (ir < 0.8) return("ESCENARIO II")
+    else return("ESCENARIO IV")
+  } else if (tasa_desercion < 10) {
+    if (ir < 0.5) return("ESCENARIO II")
+    else if (ir < 0.8) return("ESCENARIO III")
+    else return("ESCENARIO IV")
+  } else {
+    if (ir < 0.8) return("ESCENARIO III")
+    else return("ESCENARIO IV")
+  }
+}
+
+escenario_ipv3$escenario_vacuna <- mapply(clasificar_escenario, escenario_ipv3$tasa_desercion, escenario_ipv3$ir)
+
+
+tbl_escenerarios_ipv3<- escenario_ipv3%>%
+  left_join(ubigeo_bd)%>%
+  dplyr::select(provincia,distrito,ir,tasa_desercion,escenario_vacuna)
+
+datatable(tbl_escenerarios_ipv3,,colnames = c('Provincia','Distrito',
+                                   'IR','Tasa de Desercion',
+                                   'Escenario de Riesgo'),
+          extensions = 'Buttons',
+           options = list(
+             dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 5,
+    #autoWidth = TRUE,  # Ajuste automático del ancho
+    #scrollX = FALSE,   # TRUE si tuvieras muchas columnas
+    columnDefs = list(list(width = 'auto', targets = "_all"))  # Ajuste proporcional
+),caption = "Tabla 3: Escenarios de Riesgo IPV (2023-2025)"
+)%>%
+  formatStyle(
+    'escenario_vacuna',
+    target = 'cell',
+    backgroundColor = styleEqual(
+      c("ESCENARIO IV", "ESCENARIO III", "ESCENARIO II", "ESCENARIO I"),
+      c("red","orange","yellow", "green")
+    ),
+    color = styleEqual(
+      c("ESCENARIO IV", "ESCENARIO III", "ESCENARIO II", "ESCENARIO I"),
+      c("white", "white", "white", "white")
+    ),
+    fontWeight = "bold"
+  )
+```
+
+#### MAPA
+
+```{r}
+# 1. Unir y seleccionar
+mapa_escenarios_ipv3 <- shp_region_lima %>%
+  left_join(escenario_ipv3, by = "ubigeo") %>%
+  select(ubigeo, nombprov, nombdist,ir,tasa_desercion, escenario_vacuna, geometry)
+
+# Paso 1: Forzar factor y niveles ordenados (ya hecho)
+mapa_escenarios_ipv3 <- mapa_escenarios_ipv3 %>%
+  mutate(
+    escenario_vacuna = toupper(trimws(escenario_vacuna,)),
+    escenario_vacuna = factor(escenario_vacuna,, levels = c("ESCENARIO I", "ESCENARIO II", "ESCENARIO III", "ESCENARIO IV"))
+  )
+
+# Paso 2: Crear columna color manualmente para cada nivel, NA tendrá negro
+mapa_escenarios_ipv3 <- mapa_escenarios_ipv3 %>%
+  mutate(
+    color_riesgo = case_when(
+      escenario_vacuna == "ESCENARIO I" ~ "green",
+      escenario_vacuna == "ESCENARIO II"     ~ "yellow",
+      escenario_vacuna == "ESCENARIO III"    ~ "orange",
+      escenario_vacuna == "ESCENARIO IV"     ~ "red",
+      TRUE                    ~ "black"   # para NA y cualquier otro valor
+    )
+  )
+
+# Paso 3: Crear mapa usando color_riesgo directamente
+leaflet(mapa_escenarios_ipv3) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~color_riesgo,
+    weight = 1,
+    opacity = 1,
+    color = "black",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = ~paste0(
+  "<strong>Distrito:</strong> ", nombdist, "<br>",
+  "<strong>Provincia:</strong> ", nombprov, "<br>",
+  "<strong>Índice de Riesgo (IR):</strong> ", ir, "<br>",
+  "<strong>Tasa de Deserción</strong> ", tasa_desercion, "<br>",
+  "<strong>Escenario Riesgo:</strong> ", 
+  ifelse(is.na(escenario_vacuna), "Sin dato", as.character(escenario_vacuna))
+) %>% lapply(htmltools::HTML),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    colors = c("transparent", "green", "yellow", "red", "black"),
+    labels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO", "Sin dato"),
+    opacity = 0.7,
+    title = "Nivel de Riesgo",
+    position = "bottomright"
+  )
+```
+:::
+
+## 4. Acumulo de Susceptibles para vacuna Pentavalente(PENTA 3)
+
+::: panel-tabset
+#### TABLA
+
+```{r}
+
+#trabajaremos con poblacion menor de 1 año y a partir del año 2020 en adelante
+
+pobla_penta3<- poblacion_bd%>%
+  filter(ano>=2021)%>%
+  dplyr::select(ano,ubigeo,x0a)%>%
+  mutate(cod_penta3=paste0(ano,ubigeo))%>%
+  dplyr::select(-ubigeo,-ano)%>%
+  rename("pobla_men1a"="x0a")
+
+#rm(pobla_penta3)
+
+#generaremos la tabla poblacion por año para ipv3
+tbl_pobla_penta3<- poblacion_bd%>%
+  filter(ano>=2021)%>%
+  dplyr::select(ano,ubigeo,x0a)%>%
+  mutate(cod_ipv3=paste0(ano,ubigeo))%>%
+  rename("pobla_men1a"="x0a")%>%
+  dplyr::select(ubigeo,ano,pobla_men1a)%>%
+  pivot_wider(
+    names_from = "ano",
+    values_from = "pobla_men1a"
+  )%>%
+  clean_names()%>%
+  mutate(pobla_total=x2021+x2022+x2023+x2024+x2025)
+
+#generamos los no vacunados,ineficada,suceptible,IR
+
+no_vacunados_penta3<- acumulo_distritos%>%
+  filter(ano>=2021)%>%
+  dplyr::select(ano,ubigeo,penta3)%>%
+  group_by(ano,ubigeo)%>%
+  summarise(total_penta3=sum(penta3))%>%
+  mutate(cod_penta3=paste0(ano,ubigeo))
+
+
+no_vacunados_penta3<-no_vacunados_penta3 %>%
+  left_join(pobla_penta3,by="cod_penta3")
+
+no_vacunados_penta3<-no_vacunados_penta3%>%
+  dplyr::select(cod_penta3,ano,ubigeo,total_penta3,pobla_men1a)%>%
+  group_by(ubigeo)%>%
+  summarise(total_vacunados=sum(total_penta3),
+            total_poblacion=sum(pobla_men1a))%>%
+  mutate(no_vacunados=total_poblacion - total_vacunados,
+         no_inmunizados=ceiling(total_vacunados*0.05),
+         suceptibles=no_vacunados+no_inmunizados)%>%
+  ungroup
+
+no_vacunados_penta3<- no_vacunados_penta3%>%
+  left_join(tbl_pobla_penta3)%>%
+  dplyr::select(-x2021,-x2022,-x2023,-x2024)
+
+no_vacunados_penta3<-no_vacunados_penta3%>%
+  mutate(ir=round(suceptibles/x2025,2))
+  
+no_vacunados_penta3$riesgo_ir<-with(no_vacunados_penta3, ifelse(ir < 0, "NEGATIVO",
+                      ifelse(ir < 0.5, "BAJO",
+                      ifelse(ir < 0.8, "MEDIO", "ALTO"))))
+
+no_vacunados_penta3<-no_vacunados_penta3%>%
+  dplyr::select(-total_vacunados,-total_poblacion,-x2025)
+
+#rm(no_vacunados_ipv3)
+
+
+
+
+
+#generaremos los vacunados por año
+vacunados_penta3<- acumulo_distritos%>%
+  filter(ano>=2021)%>%
+  dplyr::select(ano,ubigeo,penta3)%>%
+  group_by(ano,ubigeo)%>%
+  summarise(total_penta3=sum(penta3))%>%
+  pivot_wider(
+    names_from = "ano",
+    values_from = "total_penta3"
+  )%>%
+  rename( "v2021"="2021",
+          "v2022"="2022",
+          "v2023"="2023",
+          "v2024"="2024",
+          "v2025"="2025")%>%
+  mutate(total_vacunados=v2021+v2022+v2023+v2024+v2025)
+
+
+# juntaremos entonces las tablas generadas para poner ver el indiceo de riesgo
+
+
+tbl_acumulo_penta3<-tbl_pobla_penta3%>%
+  left_join(vacunados_penta3)
+
+tbl_acumulo_penta3<- tbl_acumulo_penta3%>%
+  left_join(no_vacunados_penta3)
+
+tbl_acumulo_penta3<-tbl_acumulo_penta3%>%
+  left_join(ubigeo_bd)
+
+tbl_acumulo_penta3<-tbl_acumulo_penta3%>%
+  dplyr::select(provincia,distrito,total_vacunados,no_vacunados,no_inmunizados,suceptibles,ir,riesgo_ir)
+
+
+datatable(tbl_acumulo_penta3,colnames = c('Provincia','Distrito',
+                                   'Total Vac.','No Vacunados',
+                                   'No Inmunizados','Suceptibles',
+                                   'IR','Riesgo'),
+          extensions = 'Buttons',
+           options = list(
+             dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 5,
+    #autoWidth = TRUE,  # Ajuste automático del ancho
+    #scrollX = FALSE,   # TRUE si tuvieras muchas columnas
+    columnDefs = list(list(width = 'auto', targets = "_all"))  # Ajuste proporcional
+),caption = "Tabla 4: Acumulo de Suceptibles Pentavalente(2021-2025)"
+)%>%
+  formatStyle(
+    'riesgo_ir',
+    target = 'cell',
+    backgroundColor = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("red", "yellow", "green", NA)
+    ),
+    color = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("white", "white", "white", "black")
+    ),
+    fontWeight = "bold"
+  )
+```
+
+#### MAPA
+
+```{r}
+# 1. Unir y seleccionar
+mapa_acumulo_penta3 <- shp_region_lima %>%
+  left_join(no_vacunados_penta3, by = "ubigeo") %>%
+  select(ubigeo, nombprov, nombdist, ir, riesgo_ir, geometry)
+
+# Paso 1: Forzar factor y niveles ordenados (ya hecho)
+mapa_acumulo_penta3 <- mapa_acumulo_penta3 %>%
+  mutate(
+    riesgo_ir = toupper(trimws(riesgo_ir)),
+    riesgo_ir = factor(riesgo_ir, levels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO"))
+  )
+
+# Paso 2: Crear columna color manualmente para cada nivel, NA tendrá negro
+mapa_acumulo_penta3 <- mapa_acumulo_penta3 %>%
+  mutate(
+    color_riesgo = case_when(
+      riesgo_ir == "NEGATIVO" ~ "transparent",
+      riesgo_ir == "BAJO"     ~ "green",
+      riesgo_ir == "MEDIO"    ~ "yellow",
+      riesgo_ir == "ALTO"     ~ "red",
+      TRUE                    ~ "black"   # para NA y cualquier otro valor
+    )
+  )
+
+# Paso 3: Crear mapa usando color_riesgo directamente
+leaflet(mapa_acumulo_penta3) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~color_riesgo,
+    weight = 1,
+    opacity = 1,
+    color = "black",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = ~paste0(
+  "<strong>Distrito:</strong> ", nombdist, "<br>",
+  "<strong>Provincia:</strong> ", nombprov, "<br>",
+  "<strong>Índice de Riesgo (IR):</strong> ", ir, "<br>",
+  "<strong>Clasificación Riesgo:</strong> ", 
+  ifelse(is.na(riesgo_ir), "Sin dato", as.character(riesgo_ir))
+) %>% lapply(htmltools::HTML),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    colors = c("transparent", "green", "yellow", "red", "black"),
+    labels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO", "Sin dato"),
+    opacity = 0.7,
+    title = "Nivel de Riesgo",
+    position = "bottomright"
+  )
+```
+:::
+
+## 5. Tasa de deserción para vacuna Pentavalente
+
+::: panel-tabset
+## TABLA
+
+```{r}
+abandono_vacuna_penta3<-acumulo_distritos%>%
+  filter(ano>=2021)%>%
+  dplyr::select(ano,ubigeo,penta1,penta3)%>%
+  mutate(cod_penta3=paste0(ano,ubigeo))%>%
+  group_by(ubigeo)%>%
+  summarise(total_penta1=sum(penta1),
+    total_penta3=sum(penta3))%>%
+  mutate(tasa_desercion=round((((total_penta1 - total_penta3)/total_penta1)*1),2),
+         riesgo_desercion=
+           case_when(
+    tasa_desercion < 0  ~ "NEGATIVO",
+    tasa_desercion >= 0 & tasa_desercion < 5    ~ "BAJO",
+    tasa_desercion >= 5 & tasa_desercion < 10   ~ "MEDIO",
+    tasa_desercion >= 10 ~ "ALTO",
+    TRUE                ~ NA_character_ # Para valores NA o no clasificados
+  ))
+  
+tbl_desercion_penta3<- abandono_vacuna_penta3%>%
+  left_join(ubigeo_bd)%>%
+  dplyr::select(provincia,distrito,total_penta1,total_penta3,tasa_desercion,
+                riesgo_desercion)
+
+datatable(tbl_desercion_penta3,colnames = c('Provincia','Distrito',
+                                   'Total Penta 1.','Total Penta 3',
+                                   'Tasa de Desercion','Riesgo'),
+         extensions = 'Buttons',
+           options = list(
+             dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 5,
+    #autoWidth = TRUE,  # Ajuste automático del ancho
+    #scrollX = FALSE,   # TRUE si tuvieras muchas columnas
+    columnDefs = list(list(width = 'auto', targets = "_all"))  # Ajuste proporcional
+),caption = "Tabla 5: Tasa de Desercion Pentavalente (2021-2025)"
+)%>%
+  formatStyle(
+    'riesgo_desercion',
+    target = 'cell',
+    backgroundColor = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("red", "yellow", "green", NA)
+    ),
+    color = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("white", "white", "white", "black")
+    ),
+    fontWeight = "bold"
+  )
+```
+
+## MAPA
+
+```{r}
+# 1. Unir y seleccionar
+mapa_desercion_penta3 <- shp_region_lima %>%
+  left_join(abandono_vacuna_penta3, by = "ubigeo") %>%
+  select(ubigeo, nombprov, nombdist, tasa_desercion, riesgo_desercion, geometry)
+
+# Paso 1: Forzar factor y niveles ordenados (ya hecho)
+mapa_desercion_penta3 <- mapa_desercion_penta3 %>%
+  mutate(
+    riesgo_desercion = toupper(trimws(riesgo_desercion)),
+    riesgo_desercion = factor(riesgo_desercion, levels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO"))
+  )
+
+# Paso 2: Crear columna color manualmente para cada nivel, NA tendrá negro
+mapa_desercion_penta3 <- mapa_desercion_penta3 %>%
+  mutate(
+    color_riesgo = case_when(
+      riesgo_desercion == "NEGATIVO" ~ "transparent",
+      riesgo_desercion == "BAJO"     ~ "green",
+      riesgo_desercion == "MEDIO"    ~ "yellow",
+      riesgo_desercion == "ALTO"     ~ "red",
+      TRUE                    ~ "black"   # para NA y cualquier otro valor
+    )
+  )
+
+# Paso 3: Crear mapa usando color_riesgo directamente
+leaflet(mapa_desercion_penta3) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~color_riesgo,
+    weight = 1,
+    opacity = 1,
+    color = "black",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = ~paste0(
+  "<strong>Distrito:</strong> ", nombdist, "<br>",
+  "<strong>Provincia:</strong> ", nombprov, "<br>",
+  "<strong>Tasa de Deserción:</strong> ", tasa_desercion, "<br>",
+  "<strong>Clasificación Riesgo:</strong> ", 
+  ifelse(is.na(riesgo_desercion), "Sin dato", as.character(riesgo_desercion))
+) %>% lapply(htmltools::HTML),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    colors = c("transparent", "green", "yellow", "red", "black"),
+    labels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO", "Sin dato"),
+    opacity = 0.7,
+    title = "Nivel de Riesgo",
+    position = "bottomright"
+  )
+```
+:::
+
+## 6. Escenario de Riesgo para vacuna Pentavalente
+
+::: panel-tabset
+#### TABLA
+
+```{r}
+escenario_penta3<-no_vacunados_penta3%>%
+  dplyr::select(ubigeo,ir)%>%
+  left_join(abandono_vacuna_penta3)%>%
+  dplyr::select(ubigeo,ir,tasa_desercion)
+
+clasificar_escenario <- function(tasa_desercion, ir) {
+  # Paso 1: manejar valores NA
+  if (is.na(tasa_desercion) || is.na(ir)) return(NA)
+
+  # Paso 2: manejar negativos como "Negativo" → ESCENARIO I
+  if (tasa_desercion < 0 || ir < 0) return("ESCENARIO I")
+
+  # Paso 3: lógica por rangos
+  if (tasa_desercion < 5) {
+    if (ir < 0.5) return("ESCENARIO I")
+    else if (ir < 0.8) return("ESCENARIO II")
+    else return("ESCENARIO IV")
+  } else if (tasa_desercion < 10) {
+    if (ir < 0.5) return("ESCENARIO II")
+    else if (ir < 0.8) return("ESCENARIO III")
+    else return("ESCENARIO IV")
+  } else {
+    if (ir < 0.8) return("ESCENARIO III")
+    else return("ESCENARIO IV")
+  }
+}
+
+escenario_penta3$escenario_vacuna <- mapply(clasificar_escenario, escenario_penta3$tasa_desercion, escenario_penta3$ir)
+
+
+tbl_escenerarios_penta3<- escenario_penta3%>%
+  left_join(ubigeo_bd)%>%
+  dplyr::select(provincia,distrito,ir,tasa_desercion,escenario_vacuna)
+
+datatable(tbl_escenerarios_penta3,colnames = c('Provincia','Distrito',
+                                   'IR','Tasa de Desercion',
+                                   'Escenario de Riesgo'),
+          extensions = 'Buttons',
+           options = list(
+             dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 5,
+    #autoWidth = TRUE,  # Ajuste automático del ancho
+    #scrollX = FALSE,   # TRUE si tuvieras muchas columnas
+    columnDefs = list(list(width = 'auto', targets = "_all"))  # Ajuste proporcional
+),caption = "Tabla 6: Escenarios de Riesgo Pentavalente (2021-2025)"
+)%>%
+  formatStyle(
+    'escenario_vacuna',
+    target = 'cell',
+    backgroundColor = styleEqual(
+      c("ESCENARIO IV", "ESCENARIO III", "ESCENARIO II", "ESCENARIO I"),
+      c("red","orange","yellow", "green")
+    ),
+    color = styleEqual(
+      c("ESCENARIO IV", "ESCENARIO III", "ESCENARIO II", "ESCENARIO I"),
+      c("white", "white", "white", "white")
+    ),
+    fontWeight = "bold"
+  )
+```
+
+#### MAPA
+
+```{r}
+# 1. Unir y seleccionar
+mapa_escenarios_penta3 <- shp_region_lima %>%
+  left_join(escenario_penta3, by = "ubigeo") %>%
+  select(ubigeo, nombprov, nombdist,ir,tasa_desercion, escenario_vacuna, geometry)
+
+# Paso 1: Forzar factor y niveles ordenados (ya hecho)
+mapa_escenarios_penta3 <- mapa_escenarios_penta3 %>%
+  mutate(
+    escenario_vacuna = toupper(trimws(escenario_vacuna,)),
+    escenario_vacuna = factor(escenario_vacuna,, levels = c("ESCENARIO I", "ESCENARIO II", "ESCENARIO III", "ESCENARIO IV"))
+  )
+
+# Paso 2: Crear columna color manualmente para cada nivel, NA tendrá negro
+mapa_escenarios_penta3 <- mapa_escenarios_penta3 %>%
+  mutate(
+    color_riesgo = case_when(
+      escenario_vacuna == "ESCENARIO I" ~ "green",
+      escenario_vacuna == "ESCENARIO II"     ~ "yellow",
+      escenario_vacuna == "ESCENARIO III"    ~ "orange",
+      escenario_vacuna == "ESCENARIO IV"     ~ "red",
+      TRUE                    ~ "black"   # para NA y cualquier otro valor
+    )
+  )
+
+# Paso 3: Crear mapa usando color_riesgo directamente
+leaflet(mapa_escenarios_penta3) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~color_riesgo,
+    weight = 1,
+    opacity = 1,
+    color = "black",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = ~paste0(
+  "<strong>Distrito:</strong> ", nombdist, "<br>",
+  "<strong>Provincia:</strong> ", nombprov, "<br>",
+  "<strong>Índice de Riesgo (IR):</strong> ", ir, "<br>",
+  "<strong>Tasa de Deserción</strong> ", tasa_desercion, "<br>",
+  "<strong>Escenario Riesgo:</strong> ", 
+  ifelse(is.na(escenario_vacuna), "Sin dato", as.character(escenario_vacuna))
+) %>% lapply(htmltools::HTML),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    colors = c("transparent", "green", "yellow", "red", "black"),
+    labels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO", "Sin dato"),
+    opacity = 0.7,
+    title = "Nivel de Riesgo",
+    position = "bottomright"
+  )
+```
+:::
+
+## 7. Acumulo de Suceptible para vacuna SPR(SPR2)
+
+::: panel-tabset
+#### TABLA
+
+```{r}
+#trabajaremos con poblacion  de 1 año y a partir del año 2024 en adelante
+
+pobla_spr2<- poblacion_bd%>%
+  filter(ano>=2024)%>%
+  dplyr::select(ano,ubigeo,x1a)%>%
+  mutate(cod_spr2=paste0(ano,ubigeo))%>%
+  dplyr::select(-ubigeo,-ano)%>%
+  rename("pobla_1a"="x1a")
+
+#generaremos la tabla poblacion por año para spr2
+tbl_pobla_spr2<- poblacion_bd%>%
+  filter(ano>=2024)%>%
+  dplyr::select(ano,ubigeo,x1a)%>%
+  mutate(cod_spr2=paste0(ano,ubigeo))%>%
+  rename("pobla_1a"="x1a")%>%
+  dplyr::select(ubigeo,ano,pobla_1a)%>%
+  pivot_wider(
+    names_from = "ano",
+    values_from = "pobla_1a"
+  )%>%
+  clean_names()%>%
+  mutate(pobla_total=x2024+x2025)
+
+#generamos los no vacunados,ineficada,suceptible,IR
+
+no_vacunados_spr2<- acumulo_distritos%>%
+  filter(ano>=2024)%>%
+  dplyr::select(ano,ubigeo,spr2)%>%
+  group_by(ano,ubigeo)%>%
+  summarise(total_spr2=sum(spr2))%>%
+  mutate(cod_spr2=paste0(ano,ubigeo))
+
+
+no_vacunados_spr2<-no_vacunados_spr2%>%
+  left_join(pobla_spr2,by="cod_spr2")
+
+no_vacunados_spr2<-no_vacunados_spr2%>%
+  dplyr::select(cod_spr2,ano,ubigeo,total_spr2,pobla_1a)%>%
+  group_by(ubigeo)%>%
+  summarise(total_vacunados=sum(total_spr2),
+            total_poblacion=sum(pobla_1a))%>%
+  mutate(no_vacunados=total_poblacion - total_vacunados,
+         no_inmunizados=ceiling(total_vacunados*0.05),
+         suceptibles=no_vacunados+no_inmunizados)%>%
+  ungroup
+
+no_vacunados_spr2<- no_vacunados_spr2%>%
+  left_join(tbl_pobla_spr2)%>%
+  dplyr::select(-x2024)
+
+no_vacunados_spr2<-no_vacunados_spr2%>%
+  mutate(ir=round(suceptibles/x2025,2))
+  
+no_vacunados_spr2$riesgo_ir<-with(no_vacunados_spr2, ifelse(ir < 0, "NEGATIVO",
+                      ifelse(ir < 0.5, "BAJO",
+                      ifelse(ir < 0.8, "MEDIO", "ALTO"))))
+
+no_vacunados_spr2<-no_vacunados_spr2%>%
+  dplyr::select(-total_vacunados,-total_poblacion,-x2025)
+
+#rm(no_vacunados_ipv3)
+
+
+
+
+
+#generaremos los vacunados por año
+vacunados_spr2<- acumulo_distritos%>%
+  filter(ano>=2024)%>%
+  dplyr::select(ano,ubigeo,spr2)%>%
+  group_by(ano,ubigeo)%>%
+  summarise(total_spr2=sum(spr2))%>%
+  pivot_wider(
+    names_from = "ano",
+    values_from = "total_spr2"
+  )%>%
+  rename(
+         "v2024"="2024",
+         "v2025"="2025")%>%
+  mutate(total_vacunados=v2024+v2025)
+
+
+# juntaremos entonces las tablas generadas para poner ver el indiceo de riesgo
+
+
+tbl_acumulo_spr2<-tbl_pobla_spr2%>%
+  left_join(vacunados_spr2)
+
+tbl_acumulo_spr2<- tbl_acumulo_spr2%>%
+  left_join(no_vacunados_spr2)
+
+tbl_acumulo_spr2<-tbl_acumulo_spr2%>%
+  left_join(ubigeo_bd)
+
+tbl_acumulo_spr2<-tbl_acumulo_spr2%>%
+  dplyr::select(provincia,distrito,total_vacunados,no_vacunados,no_inmunizados,suceptibles,ir,riesgo_ir)
+
+
+datatable(tbl_acumulo_spr2,colnames = c('Provincia','Distrito',
+                                   'Total Vac.','No Vacunados',
+                                   'No Inmunizados','Suceptibles',
+                                   'IR','Riesgo'),
+          extensions = 'Buttons',
+           options = list(
+             dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 5,
+    #autoWidth = TRUE,  # Ajuste automático del ancho
+    #scrollX = FALSE,   # TRUE si tuvieras muchas columnas
+    columnDefs = list(list(width = 'auto', targets = "_all"))  # Ajuste proporcional
+),caption = "Tabla 7: Acumulo de Suceptibles SPR2(2024-2025)"
+)%>%
+  formatStyle(
+    'riesgo_ir',
+    target = 'cell',
+    backgroundColor = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("red", "yellow", "green", NA)
+    ),
+    color = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("white", "white", "white", "black")
+    ),
+    fontWeight = "bold"
+  )
+
+```
+
+#### MAPA
+
+```{r}
+# 1. Unir y seleccionar
+mapa_acumulo_spr2 <- shp_region_lima %>%
+  left_join(no_vacunados_spr2, by = "ubigeo") %>%
+  select(ubigeo, nombprov, nombdist, ir, riesgo_ir, geometry)
+
+# Paso 1: Forzar factor y niveles ordenados (ya hecho)
+mapa_acumulo_spr2 <- mapa_acumulo_spr2 %>%
+  mutate(
+    riesgo_ir = toupper(trimws(riesgo_ir)),
+    riesgo_ir = factor(riesgo_ir, levels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO"))
+  )
+
+# Paso 2: Crear columna color manualmente para cada nivel, NA tendrá negro
+mapa_acumulo_spr2 <- mapa_acumulo_spr2 %>%
+  mutate(
+    color_riesgo = case_when(
+      riesgo_ir == "NEGATIVO" ~ "transparent",
+      riesgo_ir == "BAJO"     ~ "green",
+      riesgo_ir == "MEDIO"    ~ "yellow",
+      riesgo_ir == "ALTO"     ~ "red",
+      TRUE                    ~ "black"   # para NA y cualquier otro valor
+    )
+  )
+
+# Paso 3: Crear mapa usando color_riesgo directamente
+leaflet(mapa_acumulo_spr2) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~color_riesgo,
+    weight = 1,
+    opacity = 1,
+    color = "black",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = ~paste0(
+  "<strong>Distrito:</strong> ", nombdist, "<br>",
+  "<strong>Provincia:</strong> ", nombprov, "<br>",
+  "<strong>Índice de Riesgo (IR):</strong> ", ir, "<br>",
+  "<strong>Clasificación Riesgo:</strong> ", 
+  ifelse(is.na(riesgo_ir), "Sin dato", as.character(riesgo_ir))
+) %>% lapply(htmltools::HTML),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    colors = c("transparent", "green", "yellow", "red", "black"),
+    labels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO", "Sin dato"),
+    opacity = 0.7,
+    title = "Nivel de Riesgo",
+    position = "bottomright"
+  )
+
+```
+:::
+
+## 8. Tasa de Deserción de vacuna SPR
+
+::: panel-tabset
+#### TABLA
+
+```{r}
+
+abandono_vacuna_spr2<-acumulo_distritos%>%
+  filter(ano>=2024)%>%
+  dplyr::select(ano,ubigeo,spr1,spr2)%>%
+  mutate(cod_spr2=paste0(ano,ubigeo))%>%
+  group_by(ubigeo)%>%
+  summarise(total_spr1=sum(spr1),
+    total_spr2=sum(spr2))%>%
+  mutate(tasa_desercion=round((((total_spr1 - total_spr2)/total_spr1)*1),2),
+         riesgo_desercion=
+           case_when(
+    tasa_desercion < 0  ~ "NEGATIVO",
+    tasa_desercion >= 0 & tasa_desercion < 5    ~ "BAJO",
+    tasa_desercion >= 5 & tasa_desercion < 10   ~ "MEDIO",
+    tasa_desercion >= 10 ~ "ALTO",
+    TRUE                ~ NA_character_ # Para valores NA o no clasificados
+  ))
+  
+tbl_desercion_spr2<- abandono_vacuna_spr2%>%
+  left_join(ubigeo_bd)%>%
+  dplyr::select(provincia,distrito,total_spr1,total_spr2,tasa_desercion,
+                riesgo_desercion)
+
+datatable(tbl_desercion_spr2,colnames = c('Provincia','Distrito',
+                                   'Total SPR 1','Total SPR 2',
+                                   'Tasa de Desercion','Riesgo'),
+          extensions = 'Buttons',
+           options = list(
+             dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 5,
+    #autoWidth = TRUE,  # Ajuste automático del ancho
+    #scrollX = FALSE,   # TRUE si tuvieras muchas columnas
+    columnDefs = list(list(width = 'auto', targets = "_all"))  # Ajuste proporcional
+),caption = "Tabla 5: Tasa de Desercion SPR (2024-2025)"
+)%>%
+  formatStyle(
+    'riesgo_desercion',
+    target = 'cell',
+    backgroundColor = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("red", "yellow", "green", NA)
+    ),
+    color = styleEqual(
+      c("ALTO", "MEDIO", "BAJO", "NEGATIVO"),
+      c("white", "white", "white", "black")
+    ),
+    fontWeight = "bold"
+  )
+```
+
+#### MAPA
+
+```{r}
+# 1. Unir y seleccionar
+mapa_desercion_spr2 <- shp_region_lima %>%
+  left_join(abandono_vacuna_spr2, by = "ubigeo") %>%
+  select(ubigeo, nombprov, nombdist, tasa_desercion, riesgo_desercion, geometry)
+
+# Paso 1: Forzar factor y niveles ordenados (ya hecho)
+mapa_desercion_spr2 <- mapa_desercion_spr2 %>%
+  mutate(
+    riesgo_desercion = toupper(trimws(riesgo_desercion)),
+    riesgo_desercion = factor(riesgo_desercion, levels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO"))
+  )
+
+# Paso 2: Crear columna color manualmente para cada nivel, NA tendrá negro
+mapa_desercion_spr2 <- mapa_desercion_spr2 %>%
+  mutate(
+    color_riesgo = case_when(
+      riesgo_desercion == "NEGATIVO" ~ "transparent",
+      riesgo_desercion == "BAJO"     ~ "green",
+      riesgo_desercion == "MEDIO"    ~ "yellow",
+      riesgo_desercion == "ALTO"     ~ "red",
+      TRUE                    ~ "black"   # para NA y cualquier otro valor
+    )
+  )
+
+# Paso 3: Crear mapa usando color_riesgo directamente
+leaflet(mapa_desercion_spr2) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~color_riesgo,
+    weight = 1,
+    opacity = 1,
+    color = "black",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = ~paste0(
+  "<strong>Distrito:</strong> ", nombdist, "<br>",
+  "<strong>Provincia:</strong> ", nombprov, "<br>",
+  "<strong>Tasa de Deserción:</strong> ", tasa_desercion, "<br>",
+  "<strong>Clasificación Riesgo:</strong> ", 
+  ifelse(is.na(riesgo_desercion), "Sin dato", as.character(riesgo_desercion))
+) %>% lapply(htmltools::HTML),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    colors = c("transparent", "green", "yellow", "red", "black"),
+    labels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO", "Sin dato"),
+    opacity = 0.7,
+    title = "Nivel de Riesgo",
+    position = "bottomright"
+  )
+
+```
+:::
+
+## 9. Escenario de Riesgo para vacuna SPR
+
+::: panel-tabset
+#### TABLA
+
+```{r}
+escenario_spr2<-no_vacunados_spr2%>%
+  dplyr::select(ubigeo,ir)%>%
+  left_join(abandono_vacuna_spr2)%>%
+  dplyr::select(ubigeo,ir,tasa_desercion)
+
+clasificar_escenario <- function(tasa_desercion, ir) {
+  # Paso 1: manejar valores NA
+  if (is.na(tasa_desercion) || is.na(ir)) return(NA)
+
+  # Paso 2: manejar negativos como "Negativo" → ESCENARIO I
+  if (tasa_desercion < 0 || ir < 0) return("ESCENARIO I")
+
+  # Paso 3: lógica por rangos
+  if (tasa_desercion < 5) {
+    if (ir < 0.5) return("ESCENARIO I")
+    else if (ir < 0.8) return("ESCENARIO II")
+    else return("ESCENARIO IV")
+  } else if (tasa_desercion < 10) {
+    if (ir < 0.5) return("ESCENARIO II")
+    else if (ir < 0.8) return("ESCENARIO III")
+    else return("ESCENARIO IV")
+  } else {
+    if (ir < 0.8) return("ESCENARIO III")
+    else return("ESCENARIO IV")
+  }
+}
+
+escenario_spr2$escenario_vacuna <- mapply(clasificar_escenario, escenario_spr2$tasa_desercion, escenario_penta3$ir)
+
+
+tbl_escenerarios_spr2<- escenario_spr2%>%
+  left_join(ubigeo_bd)%>%
+  dplyr::select(provincia,distrito,ir,tasa_desercion,escenario_vacuna)
+
+datatable(tbl_escenerarios_spr2,colnames = c('Provincia','Distrito',
+                                   'IR','Tasa de Desercion',
+                                   'Escenario de Riesgo'),
+          extensions = 'Buttons',
+           options = list(
+             dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 5,
+    #autoWidth = TRUE,  # Ajuste automático del ancho
+    #scrollX = FALSE,   # TRUE si tuvieras muchas columnas
+    columnDefs = list(list(width = 'auto', targets = "_all"))  # Ajuste proporcional
+),caption = "Tabla 6: Escenarios de Riesgo Pentavalente (2021-2025)"
+)%>%
+  formatStyle(
+    'escenario_vacuna',
+    target = 'cell',
+    backgroundColor = styleEqual(
+      c("ESCENARIO IV", "ESCENARIO III", "ESCENARIO II", "ESCENARIO I"),
+      c("red","orange","yellow", "green")
+    ),
+    color = styleEqual(
+      c("ESCENARIO IV", "ESCENARIO III", "ESCENARIO II", "ESCENARIO I"),
+      c("white", "white", "white", "white")
+    ),
+    fontWeight = "bold"
+  )
+```
+
+#### MAPA
+
+```{r}
+# 1. Unir y seleccionar
+mapa_escenarios_spr2 <- shp_region_lima %>%
+  left_join(escenario_spr2, by = "ubigeo") %>%
+  select(ubigeo, nombprov, nombdist,ir,tasa_desercion, escenario_vacuna, geometry)
+
+# Paso 1: Forzar factor y niveles ordenados (ya hecho)
+mapa_escenarios_spr2 <- mapa_escenarios_spr2 %>%
+  mutate(
+    escenario_vacuna = toupper(trimws(escenario_vacuna,)),
+    escenario_vacuna = factor(escenario_vacuna,, levels = c("ESCENARIO I", "ESCENARIO II", "ESCENARIO III", "ESCENARIO IV"))
+  )
+
+# Paso 2: Crear columna color manualmente para cada nivel, NA tendrá negro
+mapa_escenarios_spr2 <- mapa_escenarios_spr2 %>%
+  mutate(
+    color_riesgo = case_when(
+      escenario_vacuna == "ESCENARIO I" ~ "green",
+      escenario_vacuna == "ESCENARIO II"     ~ "yellow",
+      escenario_vacuna == "ESCENARIO III"    ~ "orange",
+      escenario_vacuna == "ESCENARIO IV"     ~ "red",
+      TRUE                    ~ "black"   # para NA y cualquier otro valor
+    )
+  )
+
+# Paso 3: Crear mapa usando color_riesgo directamente
+leaflet(mapa_escenarios_spr2) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~color_riesgo,
+    weight = 1,
+    opacity = 1,
+    color = "black",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    label = ~paste0(
+  "<strong>Distrito:</strong> ", nombdist, "<br>",
+  "<strong>Provincia:</strong> ", nombprov, "<br>",
+  "<strong>Índice de Riesgo (IR):</strong> ", ir, "<br>",
+  "<strong>Tasa de Deserción</strong> ", tasa_desercion, "<br>",
+  "<strong>Escenario Riesgo:</strong> ", 
+  ifelse(is.na(escenario_vacuna), "Sin dato", as.character(escenario_vacuna))
+) %>% lapply(htmltools::HTML),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    colors = c("transparent", "green", "yellow", "red", "black"),
+    labels = c("NEGATIVO", "BAJO", "MEDIO", "ALTO", "Sin dato"),
+    opacity = 0.7,
+    title = "Nivel de Riesgo",
+    position = "bottomright"
+  )
+
+```
+:::

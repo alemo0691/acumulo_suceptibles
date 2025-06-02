@@ -1,0 +1,32 @@
+.reveal h1 {
+  font-size: 70px !important;
+  font-weight: bold !important;
+  text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+}
+
+/* Estilo para todos los h2 en la presentación */
+.reveal h2 {
+  font-size: 30px !important;
+  font-weight: bold !important;
+}
+
+table.dataTable {
+  font-size: 0.7em !important;
+}
+
+.dt-buttons button {
+  transform: scale(0.7);
+  transform-origin: top left;
+  margin-right: 4px; /* ajusta espacio entre botones */
+  padding: 4px 8px;  /* reduce relleno para que luzcan más compactos */
+  font-size: 0.75em; /* reduce tamaño de texto dentro del botón */
+}
+
+/* Posiciona el logo en la esquina superior derecha de todas las diapositivas */
+.logo-epidemiologia {
+  position: fixed;
+  top: 15px;
+  right: 15px;
+  width: 120px; /* Ajusta este valor al tamaño deseado */
+  z-index: 1000;
+}
